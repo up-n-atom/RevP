@@ -6,15 +6,11 @@ RevP is a [Black Magic](https://github.com/blackmagic-debug/blackmagic) Probe v2
 ## Hardware
 ### Enclosure
 The [enclosure](/Hardware/Enclosure) is designed with [FreeCAD](https://www.freecadweb.org/).
-<p align="center">
- <img src="https://user-images.githubusercontent.com/234549/155441127-f0bcbe43-3458-4bed-a10b-a5a80a37db2f.png" alt="RevP Enclosure" />
-</p>
+
+![RevPEnclosure](https://user-images.githubusercontent.com/234549/155456691-c1cc7742-616f-4800-b96b-2d98319c478d.png)
 
 ### PCB
 The [PCB](/Hardware/PCB) schematic and layout were made with [KiCad](https://www.kicad.org/). The layout replicates a hand-drawn style by utilizing the following plugins: [Teardrops](https://github.com/NilujePerchut/kicad_scripts/tree/master/teardrops) and [RF-Tools round tracks](https://github.com/easyw/RF-tools-KiCAD/tree/master/round_tracks).
-<p align="center">
- <img src="https://user-images.githubusercontent.com/234549/155431181-df5d7e76-0dea-43b3-9a1d-fdca3a0e664a.png" alt="RevP PCB Front" />
-</p>
-<p align="center">
- <img src="https://user-images.githubusercontent.com/234549/155431197-3e5a86ef-27ae-4311-a45e-269e96d2ff65.png" alt="RevP PCB Back" />
-</p>
+
+![RevPPCBFront](https://user-images.githubusercontent.com/234549/155456033-d9c3bbb6-6a3c-4b30-935e-06154ea4e475.png)
+![RevPPCBBack](https://user-images.githubusercontent.com/234549/155456034-483af428-be1f-4d29-8993-84bc35e5bd2e.png)
