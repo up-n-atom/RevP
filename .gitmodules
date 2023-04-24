@@ -1,0 +1,3 @@
+[submodule "Firmware/blackmagic"]
+	path = Firmware/blackmagic
+	url = https://github.com/up-n-atom/blackmagic
