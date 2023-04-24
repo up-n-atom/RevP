@@ -4,7 +4,7 @@
 toolbox create
 toolbox enter
 sudo dnf install arm-none-eabi-gcc arm-none-eabi-newlib make gcc dfu-util
-git clone https://github.com/blackmagic-debug/blackmagic.git
+git clone --recursive https://github.com/blackmagic-debug/blackmagic.git
 cd blackmagic
 git apply ../blackmagic-revp.patch
 make PROBE_HOST=revp
