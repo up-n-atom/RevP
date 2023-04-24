@@ -1,0 +1,640 @@
+diff --git a/src/platforms/revp/Makefile.inc b/src/platforms/revp/Makefile.inc
+new file mode 100644
+index 00000000..7b8505fa
+--- /dev/null
++++ b/src/platforms/revp/Makefile.inc
+@@ -0,0 +1,37 @@
++CROSS_COMPILE ?= arm-none-eabi-
++CC = $(CROSS_COMPILE)gcc
++OBJCOPY = $(CROSS_COMPILE)objcopy
++
++CFLAGS += -Istm32/include -mcpu=cortex-m3 -mthumb \
++	-DSTM32F1 -I../libopencm3/include \
++	-Iplatforms/stm32 -DDFU_SERIAL_LENGTH=9
++
++LDFLAGS_BOOT := $(LDFLAGS) --specs=nano.specs -lopencm3_stm32f1 \
++	-Wl,-T,platforms/stm32/blackmagic.ld -nostartfiles -lc \
++	-Wl,-Map=mapfile -mthumb -mcpu=cortex-m3 -Wl,-gc-sections \
++	-L../libopencm3/lib
++LDFLAGS = $(LDFLAGS_BOOT) -Wl,-Ttext=0x8002000
++
++ifeq ($(ENABLE_DEBUG), 1)
++LDFLAGS += --specs=rdimon.specs
++else
++LDFLAGS += --specs=nosys.specs
++endif
++
++VPATH += platforms/stm32
++
++SRC += \
++	traceswodecode.c	\
++	traceswoasync.c	\
++	serialno.c	\
++	timing.c	\
++	timing_stm32.c	\
++
++all:	blackmagic.bin blackmagic_dfu.bin blackmagic_dfu.hex
++
++blackmagic_dfu.elf: usbdfu.o dfucore.o dfu_f1.o serialno.o
++	@echo "  LD      $@"
++	$(Q)$(CC) $^ -o $@ $(LDFLAGS_BOOT)
++
++host_clean:
++	-$(Q)$(RM) blackmagic.bin blackmagic_dfu blackmagic_dfu.bin blackmagic_dfu.hex
+diff --git a/src/platforms/revp/platform.c b/src/platforms/revp/platform.c
+new file mode 100644
+index 00000000..2dd5ad32
+--- /dev/null
++++ b/src/platforms/revp/platform.c
+@@ -0,0 +1,246 @@
++/*
++ * This file is part of the Black Magic Debug project.
++ *
++ * Copyright (C) 2011  Black Sphere Technologies Ltd.
++ * Written by Gareth McMullin <gareth@blacksphere.co.nz>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* This file implements the platform specific functions for the native implementation. */
++
++#include "general.h"
++#include "usb.h"
++#include "aux_serial.h"
++#include "morse.h"
++
++#include <libopencm3/stm32/rcc.h>
++#include <libopencm3/cm3/scb.h>
++#include <libopencm3/cm3/scs.h>
++#include <libopencm3/cm3/nvic.h>
++#include <libopencm3/stm32/exti.h>
++#include <libopencm3/stm32/usart.h>
++#include <libopencm3/usb/usbd.h>
++#include <libopencm3/stm32/adc.h>
++#include <libopencm3/stm32/flash.h>
++
++static void adc_init(void);
++static void setup_vbus_irq(void);
++
++/* This is defined by the linker script */
++extern char vector_table;
++
++#define REVP_HWVERSION_BYTE FLASH_OPTION_BYTE_2
++
++int platform_hwversion(void)
++{
++	static int hwversion = -1;
++
++	if (hwversion == -1) {
++		if (REVP_HWVERSION_BYTE != 0xffffU && REVP_HWVERSION_BYTE != 0x00ffU) {
++			/* Check if the data is valid. When valid it should only have values 4 and higher. */
++			if ((REVP_HWVERSION_BYTE >> 8U) != (~REVP_HWVERSION_BYTE & 0xffU) || (REVP_HWVERSION_BYTE & 0xffU) < 4)
++				return -2;
++			hwversion = REVP_HWVERSION_BYTE & 0xffU;
++		}
++	}
++
++	return hwversion;
++}
++
++void platform_init(void)
++{
++	SCS_DEMCR |= SCS_DEMCR_VC_MON_EN;
++
++	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
++
++	/* Enable peripherals */
++	rcc_periph_clock_enable(RCC_USB);
++	rcc_periph_clock_enable(RCC_GPIOA);
++	rcc_periph_clock_enable(RCC_GPIOB);
++	rcc_periph_clock_enable(RCC_AFIO);
++	rcc_periph_clock_enable(RCC_CRC);
++
++	/* Setup GPIO ports */
++	gpio_clear(USB_PU_PORT, USB_PU_PIN);
++	gpio_set_mode(USB_PU_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, USB_PU_PIN);
++
++	gpio_set_mode(JTAG_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TMS_DIR_PIN | TCK_PIN | TDI_PIN);
++	gpio_set_mode(JTAG_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_INPUT_FLOAT, TMS_PIN);
++
++	/* This needs some fixing... */
++	/* Toggle required to sort out line drivers... */
++	gpio_port_write(GPIOA, 0x8102);
++	gpio_port_write(GPIOB, 0x2000);
++
++	gpio_port_write(GPIOA, 0x8152);
++
++	gpio_set_mode(LED_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, LED_UART | LED_IDLE_RUN | LED_ERROR);
++
++	/*
++	 * Enable nRST output.
++	 */
++	platform_nrst_set_val(false);
++	gpio_set_mode(NRST_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, NRST_PIN);
++	gpio_set(NRST_SENSE_PORT, NRST_SENSE_PIN);
++	gpio_set_mode(NRST_SENSE_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, NRST_SENSE_PIN);
++
++	/*
++	 * Enable internal pull-up on PWR_BR so that we don't drive
++	 * TPWR locally or inadvertently supply power to the target.
++	 */
++	gpio_set(PWR_BR_PORT, PWR_BR_PIN);
++	gpio_set_mode(PWR_BR_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_OPENDRAIN, PWR_BR_PIN);
++
++	adc_init();
++
++	/* Set up the NVIC vector table for the firmware */
++	SCB_VTOR = (uint32_t)&vector_table; // NOLINT(clang-diagnostic-pointer-to-int-cast)
++
++	platform_timing_init();
++	blackmagic_usb_init();
++
++	/*
++	 * Don't enable UART if we're being debugged.
++	 */
++	if (!(SCS_DEMCR & SCS_DEMCR_TRCENA))
++		aux_serial_init();
++
++	setup_vbus_irq();
++}
++
++void platform_nrst_set_val(bool assert)
++{
++	gpio_set(TMS_PORT, TMS_PIN);
++	gpio_set_val(NRST_PORT, NRST_PIN, assert);
++
++	if (assert) {
++		for (volatile size_t i = 0; i < 10000U; ++i)
++			continue;
++	}
++}
++
++bool platform_nrst_get_val(void)
++{
++	return gpio_get(NRST_SENSE_PORT, NRST_SENSE_PIN) != 0;
++}
++
++bool platform_target_get_power(void)
++{
++	return !gpio_get(PWR_BR_PORT, PWR_BR_PIN);
++}
++
++void platform_target_set_power(const bool power)
++{
++	gpio_set_val(PWR_BR_PORT, PWR_BR_PIN, !power);
++}
++
++static void adc_init(void)
++{
++	rcc_periph_clock_enable(RCC_ADC1);
++
++	gpio_set_mode(TPWR_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, TPWR_PIN);
++
++	adc_power_off(ADC1);
++	adc_disable_scan_mode(ADC1);
++	adc_set_single_conversion_mode(ADC1);
++	adc_disable_external_trigger_regular(ADC1);
++	adc_set_right_aligned(ADC1);
++	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_239DOT5CYC);
++
++	adc_power_on(ADC1);
++
++	/* Wait for the ADC to finish starting up */
++	for (volatile size_t i = 0; i < 800000U; ++i)
++		continue;
++
++	adc_reset_calibration(ADC1);
++	adc_calibrate(ADC1);
++}
++
++uint32_t platform_target_voltage_sense(void)
++{
++	/*
++	 * Returns the voltage in tenths of a volt (so 33 means 3.3V)
++	 */
++	uint8_t channel = 8;
++	adc_set_regular_sequence(ADC1, 1, &channel);
++
++	adc_start_conversion_direct(ADC1);
++
++	/* Wait for end of conversion. */
++	while (!adc_eoc(ADC1))
++		continue;
++
++	uint32_t val = adc_read_regular(ADC1); /* 0-4095 */
++	/* Clear EOC bit. The GD32F103 does not automatically reset it on ADC read. */
++	ADC_SR(ADC1) &= ~ADC_SR_EOC;
++
++	return (val * 99U) / 8191U;
++}
++
++const char *platform_target_voltage(void)
++{
++	static char ret[] = "0.0V";
++	uint32_t val = platform_target_voltage_sense();
++	ret[0] = '0' + val / 10U;
++	ret[2] = '0' + val % 10U;
++
++	return ret;
++}
++
++void platform_request_boot(void)
++{
++	/* Disconnect USB cable */
++	gpio_set_mode(USB_PU_PORT, GPIO_MODE_INPUT, 0, USB_PU_PIN);
++
++	/* Drive boot request pin */
++	gpio_set_mode(GPIOB, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO12);
++	gpio_clear(GPIOB, GPIO12);
++}
++
++void platform_target_clk_output_enable(bool enable)
++{
++	(void)enable;
++}
++
++void exti15_10_isr(void)
++{
++	if (gpio_get(USB_VBUS_PORT, USB_VBUS_PIN))
++		/* Drive pull-up high if VBUS connected */
++		gpio_set_mode(USB_PU_PORT, GPIO_MODE_OUTPUT_10_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, USB_PU_PIN);
++	else
++		/* Allow pull-up to float if VBUS disconnected */
++		gpio_set_mode(USB_PU_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, USB_PU_PIN);
++
++	exti_reset_request(USB_VBUS_PIN);
++}
++
++static void setup_vbus_irq(void)
++{
++	nvic_set_priority(USB_VBUS_IRQ, IRQ_PRI_USB_VBUS);
++	nvic_enable_irq(USB_VBUS_IRQ);
++
++	gpio_set(USB_VBUS_PORT, USB_VBUS_PIN);
++	gpio_set(USB_PU_PORT, USB_PU_PIN);
++
++	gpio_set_mode(USB_VBUS_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, USB_VBUS_PIN);
++
++	/* Configure EXTI for USB VBUS monitor */
++	exti_select_source(USB_VBUS_PIN, USB_VBUS_PORT);
++	exti_set_trigger(USB_VBUS_PIN, EXTI_TRIGGER_BOTH);
++	exti_enable_request(USB_VBUS_PIN);
++
++	exti15_10_isr();
++}
+diff --git a/src/platforms/revp/platform.h b/src/platforms/revp/platform.h
+new file mode 100644
+index 00000000..0962d1b8
+--- /dev/null
++++ b/src/platforms/revp/platform.h
+@@ -0,0 +1,217 @@
++/*
++ * This file is part of the Black Magic Debug project.
++ *
++ * Copyright (C) 2011  Black Sphere Technologies Ltd.
++ * Written by Gareth McMullin <gareth@blacksphere.co.nz>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* This file provides the platform specific declarations for the native implementation. */
++
++#ifndef PLATFORMS_REVP_PLATFORM_H
++#define PLATFORMS_REVP_PLATFORM_H
++
++#include "gpio.h"
++#include "timing.h"
++#include "timing_stm32.h"
++
++#define PLATFORM_HAS_TRACESWO
++#define NUM_TRACE_PACKETS 128U /* This is an 8K buffer */
++#define TRACESWO_PROTOCOL 2U   /* 1 = Manchester, 2 = NRZ / async */
++#define PLATFORM_HAS_POWER_SWITCH
++
++#ifdef ENABLE_DEBUG
++#define PLATFORM_HAS_DEBUG
++extern bool debug_bmp;
++#endif
++
++#define PLATFORM_IDENT   ""
++#define UPD_IFACE_STRING "@Internal Flash   /0x08000000/8*001Kg"
++
++/* Hardware definitions... */
++#define JTAG_PORT    GPIOA
++#define TDI_PORT     JTAG_PORT
++#define TMS_DIR_PORT JTAG_PORT
++#define TMS_PORT     JTAG_PORT
++#define TCK_PORT     JTAG_PORT
++#define TDO_PORT     JTAG_PORT
++#define TDI_PIN      GPIO9
++#define TMS_DIR_PIN  GPIO1
++#define TMS_PIN      GPIO2
++#define TCK_PIN      GPIO5
++#define TDO_PIN      GPIO10
++
++#define SWDIO_DIR_PORT JTAG_PORT
++#define SWDIO_PORT     JTAG_PORT
++#define SWCLK_PORT     JTAG_PORT
++#define SWDIO_DIR_PIN  TMS_DIR_PIN
++#define SWDIO_PIN      TMS_PIN
++#define SWCLK_PIN      TCK_PIN
++
++#define TRST_PORT       JTAG_PORT
++#define NRST_PORT       JTAG_PORT
++#define NRST_SENSE_PORT JTAG_PORT
++#define TRST_PIN        GPIO6
++#define NRST_PIN        GPIO3
++#define NRST_SENSE_PIN  GPIO4
++
++/*
++ * These are the control output pin definitions for TPWR.
++ * TPWR is sensed via PB0 by sampling ADC1's channel 8.
++ */
++#define PWR_BR_PORT TRST_PORT
++#define PWR_BR_PIN  TRST_PIN
++#define TPWR_PORT   GPIOB
++#define TPWR_PIN    GPIO0
++
++#define USB_PU_PORT GPIOA
++#define USB_PU_PIN  GPIO8
++
++/* For HW Rev 4 and older */
++#define USB_VBUS_PORT GPIOB
++#define USB_VBUS_PIN  GPIO13
++/* IRQ stays the same for all hw revisions. */
++#define USB_VBUS_IRQ NVIC_EXTI15_10_IRQ
++
++#define LED_PORT      GPIOB
++#define LED_PORT_UART GPIOB
++#define LED_0         GPIO1
++#define LED_1         GPIO2
++#define LED_2         GPIO14
++#define LED_UART      LED_0
++#define LED_IDLE_RUN  LED_1
++#define LED_ERROR     LED_2
++
++#define SWD_CR       GPIO_CRL(SWDIO_PORT)
++#define SWD_CR_SHIFT (2U << 2U)
++
++#define TMS_SET_MODE()                                                                       \
++	do {                                                                                     \
++		gpio_set(TMS_DIR_PORT, TMS_DIR_PIN);                                                 \
++		gpio_set_mode(TMS_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, TMS_PIN); \
++	} while (0)
++
++#define SWDIO_MODE_FLOAT()                        \
++	do {                                          \
++		uint32_t cr = SWD_CR;                     \
++		cr &= ~(0xfU << SWD_CR_SHIFT);            \
++		cr |= (0x4U << SWD_CR_SHIFT);             \
++		GPIO_BRR(SWDIO_DIR_PORT) = SWDIO_DIR_PIN; \
++		SWD_CR = cr;                              \
++	} while (0)
++
++#define SWDIO_MODE_DRIVE()                         \
++	do {                                           \
++		uint32_t cr = SWD_CR;                      \
++		cr &= ~(0xfU << SWD_CR_SHIFT);             \
++		cr |= (0x1U << SWD_CR_SHIFT);              \
++		GPIO_BSRR(SWDIO_DIR_PORT) = SWDIO_DIR_PIN; \
++		SWD_CR = cr;                               \
++	} while (0)
++
++#define UART_PIN_SETUP()                                                                                        \
++	do {                                                                                                        \
++		gpio_set_mode(USBUSART_PORT, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, USBUSART_TX_PIN); \
++		gpio_set_mode(USBUSART_PORT, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, USBUSART_RX_PIN);             \
++		gpio_set(USBUSART_PORT, USBUSART_RX_PIN);                                                               \
++	} while (0)
++
++#define USB_DRIVER st_usbfs_v1_usb_driver
++#define USB_IRQ    NVIC_USB_LP_CAN_RX0_IRQ
++#define USB_ISR(x) usb_lp_can_rx0_isr(x)
++/*
++ * Interrupt priorities. Low numbers are high priority.
++ * TIM3 is used for traceswo capture and must be highest priority.
++ */
++#define IRQ_PRI_USB          (1U << 4U)
++#define IRQ_PRI_USBUSART     (2U << 4U)
++#define IRQ_PRI_USBUSART_DMA (2U << 4U)
++#define IRQ_PRI_USB_VBUS     (14U << 4U)
++#define IRQ_PRI_TRACE        (0U << 4U)
++#define IRQ_PRI_SWO_DMA      (0U << 4U)
++
++#define USBUSART        USBUSART3
++#define USBUSART_IRQ    NVIC_USART3_IRQ
++#define USBUSART_CLK    RCC_USART3
++#define USBUSART_PORT   GPIOB
++#define USBUSART_TX_PIN GPIO10
++#define USBUSART_RX_PIN GPIO11
++
++#define USBUSART_DMA_BUS       DMA1
++#define USBUSART_DMA_CLK       RCC_DMA1
++#define USBUSART_DMA_TX_CHAN   USBUSART3_DMA_TX_CHAN
++#define USBUSART_DMA_RX_CHAN   USBUSART3_DMA_RX_CHAN
++#define USBUSART_DMA_TX_IRQ    USBUSART3_DMA_TX_IRQ
++#define USBUSART_DMA_RX_IRQ    USBUSART3_DMA_RX_IRQ
++#define USBUSART_ISR(x)        USBUSART3_ISR(x)
++#define USBUSART_DMA_TX_ISR(x) USBUSART3_DMA_TX_ISR(x)
++#define USBUSART_DMA_RX_ISR(x) USBUSART3_DMA_RX_ISR(x)
++
++#define USBUSART3               USART3
++#define USBUSART3_IRQ           NVIC_USART3_IRQ
++#define USBUSART3_ISR(x)        usart3_isr(x)
++#define USBUSART3_DMA_TX_CHAN   DMA_CHANNEL2
++#define USBUSART3_DMA_TX_IRQ    NVIC_DMA1_CHANNEL2_IRQ
++#define USBUSART3_DMA_TX_ISR(x) dma1_channel2_isr(x)
++#define USBUSART3_DMA_RX_CHAN   DMA_CHANNEL3
++#define USBUSART3_DMA_RX_IRQ    NVIC_DMA1_CHANNEL3_IRQ
++#define USBUSART3_DMA_RX_ISR(x) dma1_channel3_isr(x)
++
++#define TRACE_TIM          TIM3
++#define TRACE_TIM_CLK_EN() rcc_periph_clock_enable(RCC_TIM3)
++#define TRACE_IRQ          NVIC_TIM3_IRQ
++#define TRACE_ISR(x)       tim3_isr(x)
++
++/* On F103, only USART1 is on AHB2 and can reach 4.5MBaud at 72 MHz. */
++#define SWO_UART        USART1
++#define SWO_UART_DR     USART1_DR
++#define SWO_UART_CLK    RCC_USART1
++#define SWO_UART_PORT   JTAG_PORT
++#define SWO_UART_RX_PIN TDO_PIN
++
++/* This DMA channel is set by the USART in use */
++#define SWO_DMA_BUS    DMA1
++#define SWO_DMA_CLK    RCC_DMA1
++#define SWO_DMA_CHAN   DMA_CHANNEL5
++#define SWO_DMA_IRQ    NVIC_DMA1_CHANNEL5_IRQ
++#define SWO_DMA_ISR(x) dma1_channel5_isr(x)
++
++#define SET_RUN_STATE(state)   running_status = (state)
++#define SET_IDLE_STATE(state)  gpio_set_val(LED_PORT, LED_IDLE_RUN, state)
++#define SET_ERROR_STATE(state) gpio_set_val(LED_PORT, LED_ERROR, state)
++
++/* Use newlib provided integer-only stdio functions */
++
++#ifdef sscanf
++#undef sscanf
++#endif
++#define sscanf siscanf
++
++#ifdef sprintf
++#undef sprintf
++#endif
++#define sprintf siprintf
++
++#ifdef vasprintf
++#undef vasprintf
++#endif
++#define vasprintf vasiprintf
++
++#ifdef snprintf
++#undef snprintf
++#endif
++#define snprintf sniprintf
++
++#endif /* PLATFORMS_REVP_PLATFORM_H */
+diff --git a/src/platforms/revp/usbdfu.c b/src/platforms/revp/usbdfu.c
+new file mode 100644
+index 00000000..1a36df6c
+--- /dev/null
++++ b/src/platforms/revp/usbdfu.c
+@@ -0,0 +1,116 @@
++/*
++ * This file is part of the Black Magic Debug project.
++ *
++ * Copyright (C) 2013 Gareth McMullin <gareth@blacksphere.co.nz>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <string.h>
++#include <libopencm3/cm3/systick.h>
++#include <libopencm3/stm32/rcc.h>
++#include <libopencm3/stm32/gpio.h>
++#include <libopencm3/cm3/scb.h>
++
++#include "usbdfu.h"
++#include "platform.h"
++
++uintptr_t app_address = 0x08002000;
++int dfu_activity_counter = 0;
++
++void dfu_detach(void)
++{
++	/* USB device must detach, we just reset... */
++	scb_reset_system();
++}
++
++int main(void)
++{
++	/* Check the force bootloader pin*/
++	rcc_periph_clock_enable(RCC_GPIOB);
++	if (gpio_get(GPIOB, GPIO12))
++		dfu_jump_app_if_valid();
++
++	dfu_protect(false);
++
++	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
++	systick_set_clocksource(STK_CSR_CLKSOURCE_AHB_DIV8);
++	systick_set_reload(900000);
++
++	/* Configure USB related clocks and pins. */
++	rcc_periph_clock_enable(RCC_GPIOA);
++	rcc_periph_clock_enable(RCC_USB);
++	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, 0, GPIO8);
++
++	systick_interrupt_enable();
++	systick_counter_enable();
++
++	/* Configure the LED pins. */
++	gpio_set_mode(LED_PORT, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, LED_0 | LED_1 | LED_2);
++
++	dfu_init(&st_usbfs_v1_usb_driver);
++
++	/* Configure the USB pull up pin. */
++	gpio_set(GPIOA, GPIO8);
++	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL, GPIO8);
++
++	dfu_main();
++}
++
++void dfu_event(void)
++{
++	/* If the counter was at 0 before we should reset LED status. */
++	if (dfu_activity_counter == 0) {
++		gpio_clear(LED_PORT, LED_0 | LED_1 | LED_2);
++	}
++
++	/* Prevent the sys_tick_handler from blinking leds for a bit. */
++	dfu_activity_counter = 10;
++
++	/* Toggle the DFU activity LED. */
++	gpio_toggle(LED_PORT, LED_1);
++}
++
++void sys_tick_handler(void)
++{
++	static int count = 0;
++	static bool reset = true;
++
++	/* Run the LED show only if there is no DFU activity. */
++	if (dfu_activity_counter != 0) {
++		dfu_activity_counter--;
++		reset = true;
++	} else {
++		if (reset) {
++			gpio_clear(LED_PORT, LED_0 | LED_1 | LED_2);
++			count = 0;
++			reset = false;
++		}
++
++		switch (count) {
++		case 0:
++			gpio_toggle(LED_PORT, LED_2); /* LED2 on/off */
++			count++;
++			break;
++		case 1:
++			gpio_toggle(LED_PORT, LED_1); /* LED1 on/off */
++			count++;
++			break;
++		case 2:
++			gpio_toggle(LED_PORT, LED_0); /* LED0 on/off */
++			count = 0;
++			break;
++		}
++	}
++}
