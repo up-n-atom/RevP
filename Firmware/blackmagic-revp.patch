@@ -1,6 +1,6 @@
 diff --git a/src/platforms/revp/Makefile.inc b/src/platforms/revp/Makefile.inc
 new file mode 100644
-index 00000000..7b8505fa
+index 00000000..4a3950ff
 --- /dev/null
 +++ b/src/platforms/revp/Makefile.inc
 @@ -0,0 +1,37 @@
@@ -13,7 +13,7 @@ index 00000000..7b8505fa
 +	-Iplatforms/stm32 -DDFU_SERIAL_LENGTH=9
 +
 +LDFLAGS_BOOT := $(LDFLAGS) --specs=nano.specs -lopencm3_stm32f1 \
-+	-Wl,-T,platforms/stm32/blackmagic.ld -nostartfiles -lc \
++	-Wl,-T,platforms/revp/revp.ld -nostartfiles -lc \
 +	-Wl,-Map=mapfile -mthumb -mcpu=cortex-m3 -Wl,-gc-sections \
 +	-L../libopencm3/lib
 +LDFLAGS = $(LDFLAGS_BOOT) -Wl,-Ttext=0x8002000
@@ -516,6 +516,41 @@ index 00000000..0962d1b8
 +#define snprintf sniprintf
 +
 +#endif /* PLATFORMS_REVP_PLATFORM_H */
+diff --git a/src/platforms/revp/revp.ld b/src/platforms/revp/revp.ld
+new file mode 100644
+index 00000000..c1d1ce78
+--- /dev/null
++++ b/src/platforms/revp/revp.ld
+@@ -0,0 +1,29 @@
++/*
++ * This file is part of the libopenstm32 project.
++ *
++ * Copyright (C) 2010 Thomas Otto <tommi@viadmin.org>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* Define memory regions. */
++MEMORY
++{
++	rom (rx) : ORIGIN = 0x08000000, LENGTH = 128K
++	ram (rwx) : ORIGIN = 0x20000000, LENGTH = 20K 
++}
++
++/* Include the common ld script from libopenstm32. */
++INCLUDE cortex-m-generic.ld
++
 diff --git a/src/platforms/revp/usbdfu.c b/src/platforms/revp/usbdfu.c
 new file mode 100644
 index 00000000..1a36df6c
