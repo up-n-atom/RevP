@@ -1,0 +1,24 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [ master ]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Install ARM GCC
+      run: sudo apt-get install -y gcc-arm-none-eabi
+
+    - uses: actions/checkout@v3
+
+    - name: Checkout Firmware
+      run: git submodule update --init --recursive Firmware/blackmagic
+
+    - name: Build
+      working-directory: ./Firmware/blackmagic
+      run: make PROBE_HOST=revp
