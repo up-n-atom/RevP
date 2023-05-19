@@ -23,7 +23,7 @@ jobs:
       run: make PROBE_HOST=revp
 
     - name: Prepare Artifacts
-      run: find src/ -type f -regex '.*\.\(elf\|bin\)$' -printf "%P\n" | tar -czf firmware.tar.gz --no-recursion -C src/ -T -
+      run: pwd
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v3
