@@ -21,3 +21,12 @@ jobs:
     - name: Build
       working-directory: ./Firmware/blackmagic
       run: make PROBE_HOST=revp
+
+    - name: Prepare Artifacts
+      run: find src/ -type f -regex '.*\.\(elf\|bin\)$' -printf "%P\n" | tar -czf firmware.tar.gz --no-recursion -C src/ -T -
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: firmware-artifact
+        path: firmware.tar.gz
