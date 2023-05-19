@@ -1,16 +1,16 @@
 diff --git a/src/platforms/revp/Makefile.inc b/src/platforms/revp/Makefile.inc
 new file mode 100644
-index 00000000..4a3950ff
+index 00000000..6b441c08
 --- /dev/null
 +++ b/src/platforms/revp/Makefile.inc
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,38 @@
 +CROSS_COMPILE ?= arm-none-eabi-
 +CC = $(CROSS_COMPILE)gcc
 +OBJCOPY = $(CROSS_COMPILE)objcopy
 +
 +CFLAGS += -Istm32/include -mcpu=cortex-m3 -mthumb \
 +	-DSTM32F1 -I../libopencm3/include \
-+	-Iplatforms/stm32 -DDFU_SERIAL_LENGTH=9
++	-Iplatforms/common/stm32 -DDFU_SERIAL_LENGTH=9
 +
 +LDFLAGS_BOOT := $(LDFLAGS) --specs=nano.specs -lopencm3_stm32f1 \
 +	-Wl,-T,platforms/revp/revp.ld -nostartfiles -lc \
@@ -24,9 +24,10 @@ index 00000000..4a3950ff
 +LDFLAGS += --specs=nosys.specs
 +endif
 +
-+VPATH += platforms/stm32
++VPATH += platforms/common/stm32
 +
 +SRC += \
++	platform.c \
 +	traceswodecode.c	\
 +	traceswoasync.c	\
 +	serialno.c	\
